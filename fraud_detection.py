@@ -10,66 +10,70 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import (
     accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    average_precision_score,
     confusion_matrix,
     ConfusionMatrixDisplay,
     classification_report,
-    roc_auc_score
+    precision_recall_curve
 )
 
-# Create a folder for saved results
 Path("results").mkdir(exist_ok=True)
 
-# 1. Load the dataset
+# 1. Load dataset
 df = pd.read_csv("creditcard.csv")
 
 print("Dataset shape:", df.shape)
 print("Missing values:", df.isnull().sum().sum())
-
 print("\nClass distribution:")
 print(df["Class"].value_counts())
 
-print("\nClass proportions:")
-print(df["Class"].value_counts(normalize=True))
-
-# 2. Separate features and target
 X = df.drop(columns=["Class"])
 y = df["Class"]
 
-# 3. Split BEFORE undersampling
+# 2. Create the untouched final test set
 X_train, X_test, y_train, y_test = train_test_split(
-    X,
-    y,
+    X, y,
     test_size=0.2,
     stratify=y,
     random_state=42
 )
 
-print("\nOriginal training size:", len(X_train))
-print("Testing size:", len(X_test))
-print("Fraud cases in test set:", int(y_test.sum()))
-
-# 4. Undersample legitimate transactions for KNN
-train = X_train.copy()
-train["Class"] = y_train
-
-fraud_rows = train[train["Class"] == 1]
-legitimate_rows = train[train["Class"] == 0].sample(
-    n=20000,
+# 3. Split training data into fitting and validation sets
+X_fit, X_val, y_fit, y_val = train_test_split(
+    X_train, y_train,
+    test_size=0.2,
+    stratify=y_train,
     random_state=42
 )
 
-train_small = pd.concat(
+# 4. Undersample legitimate transactions in fitting data only
+fit_data = X_fit.copy()
+fit_data["Class"] = y_fit
+
+fraud_rows = fit_data[fit_data["Class"] == 1]
+legitimate_rows = fit_data[fit_data["Class"] == 0].sample(
+    n=16000,
+    random_state=42
+)
+
+knn_data = pd.concat(
     [fraud_rows, legitimate_rows]
 ).sample(frac=1, random_state=42)
 
-X_small = train_small.drop(columns=["Class"])
-y_small = train_small["Class"]
+X_knn = knn_data.drop(columns=["Class"])
+y_knn = knn_data["Class"]
 
-print("\nKNN training size:", len(X_small))
-print("Legitimate cases in KNN training:", int((y_small == 0).sum()))
-print("Fraud cases in KNN training:", int((y_small == 1).sum()))
+print("\nFitting set size:", len(X_fit))
+print("Validation set size:", len(X_val))
+print("Final test set size:", len(X_test))
+print("Fraud cases in final test:", int(y_test.sum()))
+print("KNN fitting set size:", len(X_knn))
 
-# 5. Build the models
+# 5. Define models
 models = {
     "Decision Tree": (
         DecisionTreeClassifier(
@@ -77,24 +81,26 @@ models = {
             class_weight="balanced",
             random_state=42
         ),
-        X_train,
-        y_train
+        X_fit,
+        y_fit
     ),
-
-    "KNN (k=5)": (
+    "KNN": (
         make_pipeline(
             StandardScaler(),
-            KNeighborsClassifier(n_neighbors=5)
+            KNeighborsClassifier(n_neighbors=5, n_jobs=-1)
         ),
-        X_small,
-        y_small
+        X_knn,
+        y_knn
     )
 }
 
-# 6. Train and evaluate both models
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+results = []
+test_probabilities = {}
+test_predictions = {}
+selected_thresholds = {}
 
-for ax, (name, (model, Xtr, ytr)) in zip(axes, models.items()):
+# 6. Select threshold using validation data only
+for name, (model, Xtr, ytr) in models.items():
 
     print(f"\n{'=' * 45}")
     print(name)
@@ -102,49 +108,150 @@ for ax, (name, (model, Xtr, ytr)) in zip(axes, models.items()):
 
     model.fit(Xtr, ytr)
 
-    # Predict classes and fraud probabilities
-    predictions = model.predict(X_test)
+    val_prob = model.predict_proba(X_val)[:, 1]
+
+    precision, recall, thresholds = precision_recall_curve(
+        y_val, val_prob
+    )
+
+    # Precision and recall have one extra final element
+    # compared with the thresholds array.
+    f1_values = (
+        2 * precision[:-1] * recall[:-1]
+        / (precision[:-1] + recall[:-1] + 1e-12)
+    )
+
+    best_index = f1_values.argmax()
+    best_threshold = float(thresholds[best_index])
+
+    selected_thresholds[name] = best_threshold
+
+    print(f"Selected validation threshold: {best_threshold:.6f}")
+    print(f"Validation fraud F1: {f1_values[best_index]:.4f}")
+
+    # 7. Evaluate on the untouched test set
     probabilities = model.predict_proba(X_test)[:, 1]
+    test_probabilities[name] = probabilities
 
-    # Evaluation metrics
-    accuracy = accuracy_score(y_test, predictions)
-    auc = roc_auc_score(y_test, probabilities)
+    # Default threshold
+    default_pred = (probabilities >= 0.5).astype(int)
 
-    print(f"Accuracy: {accuracy:.4f}")
-    print(f"ROC-AUC: {auc:.4f}")
+    # Tuned threshold
+    tuned_pred = (probabilities >= best_threshold).astype(int)
+    test_predictions[name] = tuned_pred
 
-    print("\nClassification Report:")
-    print(
-        classification_report(
-            y_test,
-            predictions,
-            labels=[0, 1],
-            target_names=["Legit", "Fraud"],
-            zero_division=0
-        )
-    )
+    print("\n--- Default threshold: 0.50 ---")
+    print("Accuracy:", round(accuracy_score(y_test, default_pred), 4))
+    print("Fraud precision:", round(
+        precision_score(y_test, default_pred, zero_division=0), 4
+    ))
+    print("Fraud recall:", round(
+        recall_score(y_test, default_pred, zero_division=0), 4
+    ))
+    print("Fraud F1:", round(
+        f1_score(y_test, default_pred, zero_division=0), 4
+    ))
 
-    # Confusion matrix
-    cm = confusion_matrix(
+    print("\n--- Validation-selected threshold ---")
+    print("Accuracy:", round(accuracy_score(y_test, tuned_pred), 4))
+    print("Fraud precision:", round(
+        precision_score(y_test, tuned_pred, zero_division=0), 4
+    ))
+    print("Fraud recall:", round(
+        recall_score(y_test, tuned_pred, zero_division=0), 4
+    ))
+    print("Fraud F1:", round(
+        f1_score(y_test, tuned_pred, zero_division=0), 4
+    ))
+    print("ROC-AUC:", round(
+        roc_auc_score(y_test, probabilities), 4
+    ))
+    print("Average Precision:", round(
+        average_precision_score(y_test, probabilities), 4
+    ))
+
+    print("\nTuned-threshold classification report:")
+    print(classification_report(
         y_test,
-        predictions,
-        labels=[0, 1]
-    )
+        tuned_pred,
+        labels=[0, 1],
+        target_names=["Legit", "Fraud"],
+        zero_division=0
+    ))
 
-    print("Confusion Matrix:")
+    cm = confusion_matrix(y_test, tuned_pred, labels=[0, 1])
+    print("Tuned-threshold confusion matrix:")
     print(cm)
 
+    results.append({
+        "Model": name,
+        "Threshold": best_threshold,
+        "Accuracy": accuracy_score(y_test, tuned_pred),
+        "Fraud Precision": precision_score(
+            y_test, tuned_pred, zero_division=0
+        ),
+        "Fraud Recall": recall_score(
+            y_test, tuned_pred, zero_division=0
+        ),
+        "Fraud F1": f1_score(
+            y_test, tuned_pred, zero_division=0
+        ),
+        "ROC-AUC": roc_auc_score(y_test, probabilities),
+        "Average Precision": average_precision_score(
+            y_test, probabilities
+        ),
+        "False Positives": int(cm[0, 1]),
+        "False Negatives": int(cm[1, 0])
+    })
+
+# 8. Save the results table
+results_df = pd.DataFrame(results)
+results_df.to_csv("results/model_comparison.csv", index=False)
+
+print("\n=== FINAL MODEL COMPARISON ===")
+print(results_df.round(4).to_string(index=False))
+
+# 9. Plot tuned-threshold confusion matrices
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+for ax, name in zip(axes, models.keys()):
+    cm = confusion_matrix(
+        y_test, test_predictions[name], labels=[0, 1]
+    )
     ConfusionMatrixDisplay(
         confusion_matrix=cm,
         display_labels=["Legit", "Fraud"]
     ).plot(ax=ax, values_format="d", colorbar=False)
-
-    ax.set_title(name)
+    ax.set_title(f"{name} - Tuned Threshold")
 
 plt.tight_layout()
-
-# Save the confusion matrix image
-plt.savefig("results/confusion_matrices.png", dpi=150)
+plt.savefig("results/tuned_confusion_matrices.png", dpi=150)
 plt.show()
 
-print("\nConfusion matrices saved to results/confusion_matrices.png")
+# 10. Plot precision-recall curves
+plt.figure(figsize=(8, 6))
+
+for name, probabilities in test_probabilities.items():
+    precision, recall, _ = precision_recall_curve(
+        y_test, probabilities
+    )
+    ap = average_precision_score(y_test, probabilities)
+
+    plt.plot(
+        recall, precision,
+        label=f"{name} (AP = {ap:.3f})"
+    )
+
+plt.xlabel("Fraud Recall")
+plt.ylabel("Fraud Precision")
+plt.title("Precision-Recall Curve")
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig("results/precision_recall_curve.png", dpi=150)
+plt.show()
+
+print("\nSaved files:")
+print("- results/model_comparison.csv")
+print("- results/tuned_confusion_matrices.png")
+print("- results/precision_recall_curve.png")
