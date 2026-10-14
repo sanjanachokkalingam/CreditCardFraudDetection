@@ -68,6 +68,17 @@ Both models were evaluated on the same test set of 56,962 transactions, includin
 | ROC-AUC | 0.8927 | 0.9482 |
 | False positives | 1,337 | 35 |
 | False negatives | 15 | 17 |
+### Threshold Tuning Experiment
+
+The default classification threshold of 0.50 was compared with thresholds selected by maximizing the fraud F1-score on a separate validation set.
+
+For the Decision Tree, threshold tuning improved fraud F1 from 0.0978 to 0.6724 and reduced false positives from 1,337 to 56.
+
+For KNN, threshold tuning improved fraud F1 from 0.7232 to 0.7895 and reduced false positives from 20 to 17. Fraud recall decreased from 82.65% to 76.53%, illustrating the trade-off between detecting fraud and reducing false alarms.
+
+KNN achieved the strongest overall balance in this experiment, with a fraud F1-score of 0.7895 and ROC-AUC of 0.9481 at the selected threshold of 0.80.
+
+Thresholds were selected using validation data, and final performance was measured on a separate test set. The selected thresholds optimize F1-score rather than actual financial costs, so they should not be interpreted as production-ready banking thresholds.
 
 ### Confusion Matrices
 

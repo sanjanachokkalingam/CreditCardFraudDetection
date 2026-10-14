@@ -139,6 +139,41 @@ for name, (model, Xtr, ytr) in models.items():
     # Tuned threshold
     tuned_pred = (probabilities >= best_threshold).astype(int)
     test_predictions[name] = tuned_pred
+    
+    # Save metrics for both threshold settings
+    for threshold_name, predictions in [
+        ("Default (0.50)", default_pred),
+        ("Validation-tuned", tuned_pred)
+    ]:
+        cm_compare = confusion_matrix(
+            y_test, predictions, labels=[0, 1]
+        )
+
+        results.append({
+            "Model": name,
+            "Threshold Type": threshold_name,
+            "Threshold": (
+                0.50 if threshold_name == "Default (0.50)"
+                else best_threshold
+            ),
+            "Accuracy": accuracy_score(y_test, predictions),
+            "Fraud Precision": precision_score(
+                y_test, predictions, zero_division=0
+            ),
+            "Fraud Recall": recall_score(
+                y_test, predictions, zero_division=0
+            ),
+            "Fraud F1": f1_score(
+                y_test, predictions, zero_division=0
+            ),
+            "ROC-AUC": roc_auc_score(y_test, probabilities),
+            "Average Precision": average_precision_score(
+                y_test, probabilities
+            ),
+            "False Positives": int(cm_compare[0, 1]),
+            "False Negatives": int(cm_compare[1, 0])
+        })
+
 
     print("\n--- Default threshold: 0.50 ---")
     print("Accuracy:", round(accuracy_score(y_test, default_pred), 4))
